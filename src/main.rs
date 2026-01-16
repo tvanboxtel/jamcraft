@@ -308,9 +308,13 @@ async fn process_message(
 
     // Resolve to Spotify track IDs
     let mut track_ids = Vec::new();
-    for url in urls {
-        if let Some(track_id) = resolve_to_spotify_track_id(&url).await {
+    for url in &urls {
+        info!("Attempting to resolve URL: {}", url);
+        if let Some(track_id) = resolve_to_spotify_track_id(url).await {
+            info!("Successfully resolved {} to track ID: {}", url, track_id);
             track_ids.push(track_id);
+        } else {
+            warn!("Failed to resolve URL: {}", url);
         }
     }
 
