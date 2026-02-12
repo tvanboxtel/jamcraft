@@ -11,6 +11,7 @@ A Rust Slack bot that automatically adds music links from the `#jamcraft` channe
 - Reacts with 🎵 on success, ❓ on failure
 - Replies in thread with confirmation
 - In-memory deduplication (1 hour TTL) to prevent duplicate adds
+- Skips tracks already in the playlist (checks Spotify before adding)
 - Optional backfill: scan existing channel messages on startup to add missed tracks
 
 ## Prerequisites

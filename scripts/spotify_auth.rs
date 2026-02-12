@@ -31,7 +31,7 @@ async fn main() {
     };
 
     let redirect_uri = "http://127.0.0.1:3000/spotify/callback";
-    let scope = "playlist-modify-public playlist-modify-private";
+    let scope = "playlist-modify-public playlist-modify-private playlist-read-private";
 
     let auth_url = format!(
         "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&scope={}",

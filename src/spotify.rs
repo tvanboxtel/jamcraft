@@ -145,6 +145,70 @@ impl SpotifyClient {
         Ok(token_response.access_token)
     }
 
+    /// Fetches all track IDs currently in the playlist. Requires playlist-read-private scope.
+    pub async fn get_playlist_track_ids(
+        &self,
+    ) -> Result<std::collections::HashSet<String>, SpotifyError> {
+        let mut track_ids = std::collections::HashSet::new();
+        let mut offset = 0;
+        let limit = 50;
+
+        loop {
+            let access_token = self.get_access_token().await?;
+            let url = format!(
+                "https://api.spotify.com/v1/playlists/{}/items?limit={}&offset={}",
+                self.playlist_id, limit, offset
+            );
+
+            let response = self
+                .client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", access_token))
+                .send()
+                .await
+                .map_err(|e| SpotifyError::Network(format!("Request failed: {}", e)))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                return Err(SpotifyError::Api(format!(
+                    "Get playlist items failed: {} - {}",
+                    status, text
+                )));
+            }
+
+            let json: serde_json::Value = response
+                .json()
+                .await
+                .map_err(|e| SpotifyError::Network(format!("Parse failed: {}", e)))?;
+
+            let items = json
+                .get("items")
+                .and_then(|i| i.as_array())
+                .map(|a| a.as_slice())
+                .unwrap_or(&[]);
+            for item in items {
+                if let Some(item_obj) = item.get("item") {
+                    if item_obj.get("type").and_then(|t| t.as_str()) == Some("track") {
+                        if let Some(id) = item_obj.get("id").and_then(|i| i.as_str()) {
+                            track_ids.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+
+            let total = json.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
+            offset += items.len() as u32;
+            if offset as u64 >= total || items.is_empty() {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Ok(track_ids)
+    }
+
     pub async fn add_track(&self, track_id: &str) -> Result<(), SpotifyError> {
         let mut can_retry_auth = true;
         let mut can_retry_rate_limit = true;

@@ -33,7 +33,10 @@ async fn main() {
     let token_body = token_resp.text().await.unwrap_or_default();
 
     if !token_status.is_success() {
-        println!("   FAIL: Token refresh returned {}:\n{}", token_status, token_body);
+        println!(
+            "   FAIL: Token refresh returned {}:\n{}",
+            token_status, token_body
+        );
         return;
     }
 
@@ -66,7 +69,7 @@ async fn main() {
         user_id
     );
 
-    // 2b. Try to read the playlist (needs playlist-read-private or playlist-read-collaborative)
+    // 2b. Try to read the playlist (needs playlist-read-private)
     println!("\n2b. Getting playlist details (GET /v1/playlists/...)...");
     let playlist_resp = client
         .get(format!(
@@ -82,7 +85,8 @@ async fn main() {
     let playlist_body = playlist_resp.text().await.unwrap_or_default();
 
     if playlist_status.is_success() {
-        let p: serde_json::Value = serde_json::from_str(&playlist_body).unwrap_or(serde_json::json!({}));
+        let p: serde_json::Value =
+            serde_json::from_str(&playlist_body).unwrap_or(serde_json::json!({}));
         let owner_id = p["owner"]["id"].as_str().unwrap_or("?");
         let playlist_name = p["name"].as_str().unwrap_or("?");
         println!("   OK. Playlist: \"{}\"", playlist_name);
@@ -91,7 +95,10 @@ async fn main() {
             println!("       ⚠️  MISMATCH - playlist is owned by someone else! You need to be a collaborator.");
         }
     } else {
-        println!("   Cannot read playlist ({}): {}", playlist_status, playlist_body);
+        println!(
+            "   Cannot read playlist ({}): {}",
+            playlist_status, playlist_body
+        );
         println!("   (We may lack playlist-read scope; that's ok for the add test)");
     }
 

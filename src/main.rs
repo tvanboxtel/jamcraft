@@ -195,7 +195,28 @@ async fn health_handler() -> &'static str {
 }
 
 async fn backfill_existing_messages(state: AppState) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Starting backfill: scanning existing messages in #{}", state.config.music_channel_id);
+    info!(
+        "Starting backfill: scanning existing messages in #{}",
+        state.config.music_channel_id
+    );
+
+    let spotify_client = match &state.spotify {
+        Some(c) => c,
+        None => {
+            info!("Spotify not configured, skipping backfill");
+            return Ok(());
+        }
+    };
+
+    // Fetch existing playlist tracks to avoid duplicates
+    let existing_tracks = spotify_client
+        .get_playlist_track_ids()
+        .await
+        .unwrap_or_default();
+    info!(
+        "Playlist has {} existing tracks, will skip duplicates",
+        existing_tracks.len()
+    );
 
     let texts = state
         .slack
@@ -217,10 +238,10 @@ async fn backfill_existing_messages(state: AppState) -> Result<(), Box<dyn std::
                 }
                 seen_track_ids.insert(track_id.clone());
 
-                let spotify_client = match &state.spotify {
-                    Some(c) => c,
-                    None => continue,
-                };
+                // Skip if already in playlist
+                if existing_tracks.contains(&track_id) {
+                    continue;
+                }
 
                 if state.dry_run {
                     info!("[DRY RUN] Would add track from backfill: {}", track_id);
@@ -433,16 +454,30 @@ async fn process_message(
         }
     };
 
+    // Fetch existing playlist tracks (skip duplicates already in playlist)
+    let existing_tracks = if !state.dry_run {
+        spotify_client.get_playlist_track_ids().await.ok()
+    } else {
+        None
+    };
+
     // Dedupe and add tracks
     let now = Instant::now();
     let mut added_count = 0;
     let mut failed_count = 0;
 
     for track_id in track_ids {
-        // Check dedupe
+        // Check in-memory dedupe (last hour)
         if let Some(existing) = state.dedupe.get(&track_id) {
             if now.duration_since(*existing) < Duration::from_secs(3600) {
                 continue; // Skip if seen in last hour
+            }
+        }
+
+        // Skip if already in playlist
+        if let Some(ref existing) = existing_tracks {
+            if existing.contains(&track_id) {
+                continue;
             }
         }
 
@@ -509,7 +544,7 @@ async fn process_message(
             .chat_post_message(
                 channel,
                 Some(thread_ts),
-                "All tracks were already added in the last hour.",
+                "All tracks are already in the playlist.",
             )
             .await
             .map_err(|e| format!("Failed to post message: {}", e))?;
