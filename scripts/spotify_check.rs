@@ -105,7 +105,7 @@ async fn main() {
 
     let add_resp = client
         .post(format!(
-            "https://api.spotify.com/v1/playlists/{}/tracks",
+            "https://api.spotify.com/v1/playlists/{}/items",
             playlist_id
         ))
         .header("Authorization", format!("Bearer {}", access_token))

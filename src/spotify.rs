@@ -153,7 +153,7 @@ impl SpotifyClient {
             let access_token = self.get_access_token().await?;
 
             let url = format!(
-                "https://api.spotify.com/v1/playlists/{}/tracks",
+                "https://api.spotify.com/v1/playlists/{}/items",
                 self.playlist_id
             );
 
