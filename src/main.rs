@@ -11,7 +11,9 @@ use axum::{
     Router,
 };
 use dashmap::DashMap;
-use resolve::{extract_urls, resolve_to_spotify_track_id};
+use resolve::{
+    extract_urls, fetch_qobuz_track_metadata, parse_qobuz_track_id, resolve_to_spotify_track_id,
+};
 use serde_json::{json, Value};
 use slack::SlackWebClient;
 use spotify::SpotifyClient;
@@ -37,16 +39,52 @@ struct Config {
 
 #[tokio::main]
 async fn main() {
-    // Load environment variables
     dotenvy::dotenv().ok();
-
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "jamcraft=info".into()),
         )
         .init();
+
+    // --resolve URL : test resolve flow and exit (no Slack/Spotify needed for Qobuz step)
+    if let Some(url) = std::env::args().nth(1).filter(|a| a.starts_with("http")) {
+        println!("Resolving: {}\n", url);
+        println!("1. Odesli...");
+        let spotify_id = resolve_to_spotify_track_id(&url).await;
+        if let Some(ref id) = spotify_id {
+            println!("   -> Resolved to Spotify: {}", id);
+            return;
+        }
+        println!("   -> Odesli failed\n");
+        if let Some(qobuz_id) = parse_qobuz_track_id(&url) {
+            println!("2. Qobuz fallback: track_id={}", qobuz_id);
+            match fetch_qobuz_track_metadata(&qobuz_id).await {
+                Some((artist, title)) => {
+                    println!("   -> Got: {} - {}\n", artist, title);
+                    if let (Ok(cid), Ok(cs), Ok(rt), Ok(pid)) = (
+                        std::env::var("SPOTIFY_CLIENT_ID"),
+                        std::env::var("SPOTIFY_CLIENT_SECRET"),
+                        std::env::var("SPOTIFY_REFRESH_TOKEN"),
+                        std::env::var("SPOTIFY_PLAYLIST_ID"),
+                    ) {
+                        let spotify =
+                            SpotifyClient::new(cid, cs, rt, pid);
+                        println!("3. Spotify search...");
+                        match spotify.search_track(&artist, &title).await {
+                            Ok(Some(id)) => println!("   -> Found: {} (would add to playlist)", id),
+                            Ok(None) => println!("   -> No match"),
+                            Err(e) => println!("   -> Error: {}", e),
+                        }
+                    } else {
+                        println!("3. (Set Spotify env vars to test search)");
+                    }
+                }
+                None => println!("   -> Qobuz API failed (404 or error)"),
+            }
+        }
+        return;
+    }
 
     // Read configuration
     let bot_token =
@@ -231,7 +269,20 @@ async fn backfill_existing_messages(state: AppState) -> Result<(), Box<dyn std::
     for text in &texts {
         let urls = extract_urls(text);
         for url in urls {
-            if let Some(track_id) = resolve_to_spotify_track_id(&url).await {
+            let mut track_id = resolve_to_spotify_track_id(&url).await;
+
+            // Qobuz fallback: metadata → Spotify search
+            if track_id.is_none() {
+                if let Some(qobuz_id) = parse_qobuz_track_id(&url) {
+                    if let Some((artist, title)) = fetch_qobuz_track_metadata(&qobuz_id).await {
+                        if let Ok(Some(id)) = spotify_client.search_track(&artist, &title).await {
+                            track_id = Some(id);
+                        }
+                    }
+                }
+            }
+
+            if let Some(track_id) = track_id {
                 resolved_count += 1;
                 if seen_track_ids.contains(&track_id) {
                     continue;
@@ -400,9 +451,25 @@ async fn process_message(
     let mut track_ids = Vec::new();
     for url in &urls {
         info!("Attempting to resolve URL: {}", url);
-        if let Some(track_id) = resolve_to_spotify_track_id(url).await {
-            info!("Successfully resolved {} to track ID: {}", url, track_id);
-            track_ids.push(track_id);
+        let mut track_id = resolve_to_spotify_track_id(url).await;
+
+        // Qobuz fallback: Odesli doesn't support Qobuz, so try metadata → Spotify search
+        if track_id.is_none() {
+            if let Some(qobuz_id) = parse_qobuz_track_id(url) {
+                if let Some((artist, title)) = fetch_qobuz_track_metadata(&qobuz_id).await {
+                    if let Some(ref spotify) = state.spotify {
+                        if let Ok(Some(id)) = spotify.search_track(&artist, &title).await {
+                            info!("Resolved Qobuz {} to Spotify via search: {}", url, id);
+                            track_id = Some(id);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(id) = track_id {
+            info!("Successfully resolved {} to track ID: {}", url, id);
+            track_ids.push(id);
         } else {
             warn!("Failed to resolve URL: {}", url);
         }

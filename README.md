@@ -5,8 +5,8 @@ A Rust Slack bot that automatically adds music links from the `#jamcraft` channe
 ## Features
 
 - Listens to Slack Events API for messages in `#jamcraft`
-- Detects Spotify, YouTube, and Deezer links
-- Resolves links to Spotify track IDs (via direct parsing or Odesli/song.link API)
+- Detects Spotify, YouTube, Deezer, and Qobuz links
+- Resolves links to Spotify track IDs (via Odesli/song.link API, or Qobuz metadata → Spotify search)
 - Adds tracks to a Spotify playlist
 - Reacts with 🎵 on success, ❓ on failure
 - Replies in thread with confirmation
@@ -107,6 +107,8 @@ PORT=3000
 MUSIC_CHANNEL_NAME=jamcraft
 DRY_RUN=false  # Set to "true" to test without actually adding tracks to Spotify
 SCAN_EXISTING_ON_STARTUP=false  # Set to "true" to backfill existing channel messages into the playlist on startup
+
+# Qobuz links: resolved via open.qobuz.com's API (no credentials needed)
 ```
 
 **Getting the Spotify Playlist ID:**

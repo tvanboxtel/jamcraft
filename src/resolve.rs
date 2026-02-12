@@ -9,6 +9,10 @@ static SPOTIFY_TRACK_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"open\.spotify\.com/track/([a-zA-Z0-9]+)").expect("Invalid Spotify regex")
 });
 
+static QOBUZ_TRACK_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"open\.qobuz\.com/track/([a-zA-Z0-9]+)").expect("Invalid Qobuz regex")
+});
+
 pub fn extract_urls(text: &str) -> Vec<String> {
     URL_REGEX
         .find_iter(text)
@@ -26,6 +30,82 @@ pub fn parse_spotify_track_id(url: &str) -> Option<String> {
         .captures(url)
         .and_then(|caps| caps.get(1))
         .map(|m| m.as_str().to_string())
+}
+
+pub fn parse_qobuz_track_id(url: &str) -> Option<String> {
+    QOBUZ_TRACK_REGEX
+        .captures(url)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+/// Fetch track metadata (artist, title) from Qobuz API. Uses open.qobuz.com's public
+/// app_id which allows simple GET without signing - same as their smart-link pages.
+pub async fn fetch_qobuz_track_metadata(track_id: &str) -> Option<(String, String)> {
+    const QOBUZ_OPEN_APP_ID: &str = "712109809";
+
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://www.qobuz.com/api.json/0.2/track/get?track_id={}&app_id={}",
+        track_id, QOBUZ_OPEN_APP_ID
+    );
+
+    tracing::info!(
+        "Qobuz fetch: track_id={} app_id={}",
+        track_id,
+        QOBUZ_OPEN_APP_ID
+    );
+
+    let response = client
+        .get(&url)
+        .header("Origin", "https://open.qobuz.com")
+        .header("Referer", "https://open.qobuz.com/")
+        .send()
+        .await
+        .ok()?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let preview = if body.len() > 200 {
+            body[..200].to_string()
+        } else {
+            body
+        };
+        tracing::warn!("Qobuz API returned {} - {}", status, preview);
+        return None;
+    }
+
+    let json: serde_json::Value = response.json().await.ok()?;
+    let title = json.get("title").and_then(|t| t.as_str())?.to_string();
+
+    // Artist: try performer.name, performers[0].name, album.artist.name, composer.name
+    let artist = json
+        .get("performer")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .or_else(|| {
+            json.get("performers")
+                .and_then(|p| p.as_array())
+                .and_then(|a| a.first())
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+        })
+        .or_else(|| {
+            json.get("album")
+                .and_then(|a| a.get("artist"))
+                .and_then(|ar| ar.get("name"))
+                .and_then(|n| n.as_str())
+        })
+        .or_else(|| {
+            json.get("composer")
+                .and_then(|c| c.get("name"))
+                .and_then(|n| n.as_str())
+        })
+        .map(|s| s.to_string())?;
+
+    tracing::info!("Qobuz metadata: artist={} title={}", artist, title);
+    Some((artist, title))
 }
 
 pub async fn resolve_via_odesli(url: &str) -> Option<String> {
@@ -174,6 +254,12 @@ pub async fn resolve_to_spotify_track_id(url: &str) -> Option<String> {
         return Some(track_id);
     }
 
+    // Odesli doesn't support Qobuz - skip the call, let caller use Qobuz fallback
+    if parse_qobuz_track_id(url).is_some() {
+        tracing::debug!("Qobuz URL detected, skipping Odesli");
+        return None;
+    }
+
     let url = normalize_for_odesli(url);
 
     // For short links (link.deezer.com, link.spotify.com), resolve them first
@@ -197,4 +283,28 @@ pub async fn resolve_to_spotify_track_id(url: &str) -> Option<String> {
     // Fall back to Odesli with the (possibly resolved) URL
     tracing::debug!("Calling Odesli with URL: {}", url_to_use);
     resolve_via_odesli(&url_to_use).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_qobuz_track_id_extracts_id() {
+        assert_eq!(
+            parse_qobuz_track_id("https://open.qobuz.com/track/23847392"),
+            Some("23847392".to_string())
+        );
+        assert_eq!(parse_qobuz_track_id("https://open.spotify.com/track/abc"), None);
+    }
+
+    #[tokio::test]
+    async fn fetch_qobuz_metadata_returns_artist_and_title() {
+        let meta = fetch_qobuz_track_metadata("23847392").await;
+        assert!(meta.is_some(), "Qobuz API should return metadata");
+        let (artist, title) = meta.unwrap();
+        assert_eq!(artist, "Bloc Party");
+        assert_eq!(title, "Helicopter");
+    }
+
 }

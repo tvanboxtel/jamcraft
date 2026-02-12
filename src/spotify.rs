@@ -311,3 +311,57 @@ impl SpotifyClient {
         }
     }
 }
+
+impl SpotifyClient {
+    /// Search for a track by artist and title. Returns the best match track ID if found.
+    pub async fn search_track(
+        &self,
+        artist: &str,
+        title: &str,
+    ) -> Result<Option<String>, SpotifyError> {
+        let access_token = self.get_access_token().await?;
+
+        let query = format!(
+            "artist:\"{}\" track:\"{}\"",
+            artist.replace('"', "\\\""),
+            title.replace('"', "\\\"")
+        );
+        let encoded = urlencoding::encode(&query);
+        let url = format!(
+            "https://api.spotify.com/v1/search?q={}&type=track&limit=1",
+            encoded
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .await
+            .map_err(|e| SpotifyError::Network(format!("Search failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            tracing::warn!("Spotify search failed: {}", response.status());
+            return Ok(None);
+        }
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| SpotifyError::Network(format!("Parse failed: {}", e)))?;
+
+        let track_id = json
+            .get("tracks")
+            .and_then(|t| t.get("items"))
+            .and_then(|i| i.as_array())
+            .and_then(|a| a.first())
+            .and_then(|t| t.get("id"))
+            .and_then(|id| id.as_str())
+            .map(|s| s.to_string());
+
+        if let Some(ref id) = track_id {
+            tracing::info!("Spotify search found: {} - {} -> {}", artist, title, id);
+        }
+        Ok(track_id)
+    }
+}

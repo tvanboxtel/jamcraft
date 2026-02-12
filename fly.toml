@@ -4,7 +4,7 @@
 #
 
 app = 'jamcraft'
-primary_region = 'ams'
+primary_region = 'fra'  # Frankfurt - Qobuz catalog varies by region; ams (Amsterdam) was returning 404
 
 [build]
 
