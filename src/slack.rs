@@ -38,6 +38,29 @@ struct ResponseMetadata {
     next_cursor: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SlackMessage {
+    pub ts: Option<String>,
+    #[serde(rename = "thread_ts")]
+    pub thread_ts: Option<String>,
+    pub text: Option<String>,
+    #[serde(rename = "reply_count")]
+    pub reply_count: Option<u32>,
+    #[serde(rename = "bot_id")]
+    pub bot_id: Option<String>,
+    pub subtype: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConversationsHistoryResponse {
+    ok: bool,
+    messages: Option<Vec<SlackMessage>>,
+    #[serde(rename = "response_metadata")]
+    response_metadata: Option<ResponseMetadata>,
+    #[serde(rename = "has_more")]
+    has_more: Option<bool>,
+}
+
 #[derive(Debug, Serialize)]
 struct ReactionsAddRequest {
     channel: String,
@@ -165,7 +188,10 @@ impl SlackWebClient {
         Ok(())
     }
 
-    pub async fn resolve_channel_id_by_name(&self, channel_name: &str) -> Result<Option<String>, String> {
+    pub async fn resolve_channel_id_by_name(
+        &self,
+        channel_name: &str,
+    ) -> Result<Option<String>, String> {
         let url = "https://slack.com/api/conversations.list";
         let mut cursor: Option<String> = None;
         let max_pages = 5;
@@ -177,10 +203,7 @@ impl SlackWebClient {
             }
             page_count += 1;
 
-            let mut params = vec![
-                ("limit", "200"),
-                ("types", "public_channel"),
-            ];
+            let mut params = vec![("limit", "200"), ("types", "public_channel")];
 
             if let Some(ref c) = cursor {
                 params.push(("cursor", c));
@@ -200,15 +223,17 @@ impl SlackWebClient {
                 .map_err(|e| format!("Parse failed: {}", e))?;
 
             // Check if request was successful
-            let ok = raw_response.get("ok")
+            let ok = raw_response
+                .get("ok")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
             if !ok {
-                let error_msg = raw_response.get("error")
+                let error_msg = raw_response
+                    .get("error")
                     .and_then(|e| e.as_str())
                     .unwrap_or("Unknown error");
-                
+
                 // Check for missing scope details
                 let mut error_details = format!("Slack API error: {}", error_msg);
                 if error_msg == "missing_scope" {
@@ -219,7 +244,7 @@ impl SlackWebClient {
                         error_details.push_str(&format!(" (provided: {:?})", provided));
                     }
                 }
-                
+
                 return Err(error_details);
             }
 
@@ -246,6 +271,137 @@ impl SlackWebClient {
         }
 
         Ok(None)
+    }
+
+    /// Fetches all messages from a channel (and thread replies) for backfill.
+    pub async fn fetch_channel_messages(&self, channel_id: &str) -> Result<Vec<String>, String> {
+        let mut all_texts = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let mut params = vec![("channel", channel_id), ("limit", "200")];
+            if let Some(ref c) = cursor {
+                params.push(("cursor", c));
+            }
+
+            let raw: serde_json::Value = self
+                .client
+                .get("https://slack.com/api/conversations.history")
+                .header("Authorization", format!("Bearer {}", self.bot_token))
+                .query(&params)
+                .send()
+                .await
+                .map_err(|e| format!("Request failed: {}", e))?
+                .json()
+                .await
+                .map_err(|e| format!("Parse failed: {}", e))?;
+
+            if !raw.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let err = raw
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown");
+                return Err(format!("Slack API error: {}", err));
+            }
+
+            let response: ConversationsHistoryResponse =
+                serde_json::from_value(raw).map_err(|e| format!("Parse failed: {}", e))?;
+
+            let messages = response.messages.unwrap_or_default();
+            for msg in messages {
+                if msg.bot_id.is_some() || msg.subtype.is_some() {
+                    continue;
+                }
+                if let Some(ref text) = msg.text {
+                    if !text.is_empty() {
+                        all_texts.push(text.clone());
+                    }
+                }
+                if msg.reply_count.unwrap_or(0) > 0 {
+                    if let Some(ref ts) = msg.ts {
+                        if let Ok(replies) = self.fetch_thread_replies(channel_id, ts).await {
+                            all_texts.extend(replies);
+                        }
+                    }
+                }
+            }
+
+            cursor = response
+                .response_metadata
+                .and_then(|m| m.next_cursor)
+                .filter(|c| !c.is_empty());
+            if cursor.is_none() && !response.has_more.unwrap_or(false) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        Ok(all_texts)
+    }
+
+    async fn fetch_thread_replies(
+        &self,
+        channel_id: &str,
+        thread_ts: &str,
+    ) -> Result<Vec<String>, String> {
+        let mut texts = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let mut params = vec![("channel", channel_id), ("ts", thread_ts), ("limit", "200")];
+            if let Some(ref c) = cursor {
+                params.push(("cursor", c));
+            }
+
+            let raw: serde_json::Value = self
+                .client
+                .get("https://slack.com/api/conversations.replies")
+                .header("Authorization", format!("Bearer {}", self.bot_token))
+                .query(&params)
+                .send()
+                .await
+                .map_err(|e| format!("Request failed: {}", e))?
+                .json()
+                .await
+                .map_err(|e| format!("Parse failed: {}", e))?;
+
+            if !raw.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                let err = raw
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown");
+                return Err(format!("Slack API error: {}", err));
+            }
+
+            let messages: Vec<SlackMessage> = raw
+                .get("messages")
+                .and_then(|m| serde_json::from_value(m.clone()).ok())
+                .unwrap_or_default();
+
+            for msg in messages {
+                if msg.bot_id.is_some() || msg.subtype.is_some() {
+                    continue;
+                }
+                if let Some(ref text) = msg.text {
+                    if !text.is_empty() {
+                        texts.push(text.clone());
+                    }
+                }
+            }
+
+            let meta = raw.get("response_metadata");
+            cursor = meta
+                .and_then(|m| m.get("next_cursor"))
+                .and_then(|c| c.as_str())
+                .map(String::from)
+                .filter(|c| !c.is_empty());
+            if cursor.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        Ok(texts)
     }
 }
 

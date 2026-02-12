@@ -130,7 +130,8 @@ impl SpotifyClient {
             .map_err(|e| SpotifyError::Network(format!("Parse failed: {}", e)))?;
 
         // Cache the token (subtract 60 seconds for safety margin)
-        let expires_at = Instant::now() + Duration::from_secs(token_response.expires_in.saturating_sub(60));
+        let expires_at =
+            Instant::now() + Duration::from_secs(token_response.expires_in.saturating_sub(60));
         let cache = TokenCache {
             access_token: token_response.access_token.clone(),
             expires_at,
@@ -202,7 +203,40 @@ impl SpotifyClient {
             }
 
             if !status.is_success() {
+                let headers: Vec<_> = response
+                    .headers()
+                    .iter()
+                    .filter(|(k, _)| {
+                        let k = k.as_str().to_lowercase();
+                        k.starts_with("x-") || k.starts_with("spotify-") || k == "retry-after"
+                    })
+                    .map(|(k, v)| format!("{}: {:?}", k.as_str(), v.to_str().unwrap_or("?")))
+                    .collect();
+                let header_info = if headers.is_empty() {
+                    String::new()
+                } else {
+                    format!(" Headers: {:?}", headers)
+                };
                 let text = response.text().await.unwrap_or_default();
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    let err_obj = json.get("error");
+                    let msg = err_obj
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("(no message)");
+                    let reason = err_obj
+                        .and_then(|e| e.get("reason"))
+                        .and_then(|r| r.as_str());
+                    let mut detail = format!(
+                        "Spotify API error: status={} playlist_id={} track_id={} message={}",
+                        status, self.playlist_id, track_id, msg
+                    );
+                    if let Some(r) = reason {
+                        detail.push_str(&format!(" reason={}", r));
+                    }
+                    detail.push_str(&header_info);
+                    warn!("{}", detail);
+                }
                 return Err(SpotifyError::Api(format!(
                     "Add track failed: {} - {}",
                     status, text

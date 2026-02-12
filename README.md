@@ -11,6 +11,7 @@ A Rust Slack bot that automatically adds music links from the `#jamcraft` channe
 - Reacts with 🎵 on success, ❓ on failure
 - Replies in thread with confirmation
 - In-memory deduplication (1 hour TTL) to prevent duplicate adds
+- Optional backfill: scan existing channel messages on startup to add missed tracks
 
 ## Prerequisites
 
@@ -50,7 +51,9 @@ A Rust Slack bot that automatically adds music links from the `#jamcraft` channe
 3. Fill in app details (name, description)
 4. Check "I understand and agree to Spotify's Developer Terms of Service"
 5. Click "Save"
-6. In app settings, add **Redirect URI**: `http://localhost:3000/spotify/callback`
+6. In app settings, add **Redirect URIs** (you can add multiple):
+   - For local dev: `http://127.0.0.1:3000/spotify/callback` (Spotify requires loopback IP, not `localhost`)
+   - For production: `https://jamcraft.fly.dev/spotify/callback` (or your Fly.io app URL—see [Deployment](#deployment-flyio))
 7. Copy the **Client ID** and **Client Secret**
 
 **Note:** If the Spotify Developer Dashboard is temporarily unavailable, you can set up everything else and add Spotify credentials later. The bot will work without Spotify (it will just inform users that Spotify isn't configured).
@@ -102,6 +105,7 @@ SPOTIFY_PLAYLIST_ID=your-playlist-id
 PORT=3000
 MUSIC_CHANNEL_NAME=jamcraft
 DRY_RUN=false  # Set to "true" to test without actually adding tracks to Spotify
+SCAN_EXISTING_ON_STARTUP=false  # Set to "true" to backfill existing channel messages into the playlist on startup
 ```
 
 **Getting the Spotify Playlist ID:**
@@ -178,6 +182,18 @@ The bot will:
 
 If the link can't be resolved, it will react with ❓ and reply: "Couldn't resolve that link—try a Spotify link or include artist + title."
 
+### Backfilling Existing Messages
+
+To add tracks from messages that were posted *before* the bot was running, set `SCAN_EXISTING_ON_STARTUP=true` in your `.env`. On startup, the bot will:
+
+1. Fetch all messages (including thread replies) from the `#jamcraft` channel
+2. Extract music links, resolve them to Spotify tracks
+3. Add any new tracks to the playlist (skips duplicates within the scan)
+
+Run this once when first deploying, or whenever you want to import older links. The scan runs in the background after the server starts. Check logs for "Backfill complete" to see how many tracks were added.
+
+**Note:** Tracks already in the playlist from before may be added again (duplicates). You can remove them manually in Spotify if needed.
+
 ## Deployment (Fly.io)
 
 For production deployment on Fly.io:
@@ -212,8 +228,10 @@ For production deployment on Fly.io:
    fly secrets set SPOTIFY_CLIENT_SECRET=your-secret
    fly secrets set SPOTIFY_REFRESH_TOKEN=your-token
    fly secrets set SPOTIFY_PLAYLIST_ID=your-playlist-id
-   fly secrets set MUSIC_CHANNEL_NAME=jamcraft
-   fly secrets set PORT=3000
+fly secrets set MUSIC_CHANNEL_NAME=jamcraft
+fly secrets set PORT=3000
+# Optional: set to "true" for one-time backfill of existing channel messages
+# fly secrets set SCAN_EXISTING_ON_STARTUP=true
    ```
 
 5. **Deploy**:
@@ -230,11 +248,10 @@ For production deployment on Fly.io:
 
    Your app will be at: `https://jamcraft.fly.dev` (or whatever name you chose)
 
-7. **Update Slack Event Subscriptions**:
+7. **Update external services**:
 
-   - Go to your Slack app settings
-   - Change Request URL to: `https://jamcraft.fly.dev/slack/events`
-   - Slack will verify automatically
+   - **Slack**: Event Subscriptions → Request URL → `https://jamcraft.fly.dev/slack/events`
+   - **Spotify**: Add `https://jamcraft.fly.dev/spotify/callback` to Redirect URIs in your app settings
 
 8. **Check logs**:
    ```bash

@@ -1,9 +1,4 @@
-use axum::{
-    extract::Query,
-    response::Html,
-    routing::get,
-    Router,
-};
+use axum::{extract::Query, response::Html, routing::get, Router};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use serde::Deserialize;
@@ -35,8 +30,8 @@ async fn main() {
         }
     };
 
-    let redirect_uri = "http://localhost:3000/spotify/callback";
-    let scope = "playlist-modify-public";
+    let redirect_uri = "http://127.0.0.1:3000/spotify/callback";
+    let scope = "playlist-modify-public playlist-modify-private";
 
     let auth_url = format!(
         "https://accounts.spotify.com/authorize?client_id={}&response_type=code&redirect_uri={}&scope={}",
@@ -49,12 +44,13 @@ async fn main() {
     println!("1. Open this URL in your browser:");
     println!("   {}\n", auth_url);
     println!("2. Authorize the app and copy the code from the callback URL\n");
-    println!("Waiting for callback on http://localhost:3000/spotify/callback...\n");
+    println!("Waiting for callback on http://127.0.0.1:3000/spotify/callback...\n");
 
-    let app = Router::new()
-        .route("/spotify/callback", get(callback_handler));
+    let app = Router::new().route("/spotify/callback", get(callback_handler));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+        .await
+        .unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -81,7 +77,8 @@ async fn callback_handler(Query(params): Query<CallbackParams>) -> Html<String> 
                 println!("SPOTIFY_REFRESH_TOKEN={}\n", refresh_token);
                 println!("You can now close this window and stop the server (Ctrl+C).\n");
 
-                return Html(r#"
+                return Html(
+                    r#"
                     <html>
                         <body>
                             <h1>Success!</h1>
@@ -89,7 +86,9 @@ async fn callback_handler(Query(params): Query<CallbackParams>) -> Html<String> 
                             <p>You can close this window.</p>
                         </body>
                     </html>
-                "#.to_string());
+                "#
+                    .to_string(),
+                );
             }
             Err(e) => {
                 eprintln!("Error exchanging code: {}", e);
@@ -109,14 +108,17 @@ async fn callback_handler(Query(params): Query<CallbackParams>) -> Html<String> 
         }
     }
 
-    Html(r#"
+    Html(
+        r#"
         <html>
             <body>
                 <h1>No code received</h1>
                 <p>Please try again.</p>
             </body>
         </html>
-    "#.to_string())
+    "#
+        .to_string(),
+    )
 }
 
 async fn exchange_code(code: &str) -> Result<String, String> {
@@ -125,7 +127,7 @@ async fn exchange_code(code: &str) -> Result<String, String> {
     let client_secret = std::env::var("SPOTIFY_CLIENT_SECRET")
         .map_err(|_| "SPOTIFY_CLIENT_SECRET not set in environment")?;
 
-    let redirect_uri = "http://localhost:3000/spotify/callback";
+    let redirect_uri = "http://127.0.0.1:3000/spotify/callback";
     let auth = BASE64_STANDARD.encode(format!("{}:{}", client_id, client_secret));
 
     let client = reqwest::Client::new();

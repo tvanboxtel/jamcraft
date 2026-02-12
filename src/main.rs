@@ -49,37 +49,33 @@ async fn main() {
         .init();
 
     // Read configuration
-    let bot_token = std::env::var("SLACK_BOT_TOKEN")
-        .expect("SLACK_BOT_TOKEN must be set in .env file");
+    let bot_token =
+        std::env::var("SLACK_BOT_TOKEN").expect("SLACK_BOT_TOKEN must be set in .env file");
     let signing_secret = std::env::var("SLACK_SIGNING_SECRET")
         .expect("SLACK_SIGNING_SECRET must be set in .env file");
-    
+
     // Spotify credentials (required for full functionality)
-    let spotify_client_id = std::env::var("SPOTIFY_CLIENT_ID")
-        .unwrap_or_else(|_| {
-            eprintln!("\n⚠️  WARNING: SPOTIFY_CLIENT_ID not set");
-            eprintln!("   The bot will start but won't be able to add tracks to Spotify.");
-            eprintln!("   Get credentials from: https://developer.spotify.com/dashboard\n");
-            String::new()
-        });
-    let spotify_client_secret = std::env::var("SPOTIFY_CLIENT_SECRET")
-        .unwrap_or_else(|_| {
-            eprintln!("⚠️  WARNING: SPOTIFY_CLIENT_SECRET not set\n");
-            String::new()
-        });
-    let spotify_refresh_token = std::env::var("SPOTIFY_REFRESH_TOKEN")
-        .unwrap_or_else(|_| {
-            eprintln!("⚠️  WARNING: SPOTIFY_REFRESH_TOKEN not set");
-            eprintln!("   Run: cargo run --bin spotify_auth\n");
-            String::new()
-        });
-    let spotify_playlist_id = std::env::var("SPOTIFY_PLAYLIST_ID")
-        .unwrap_or_else(|_| {
-            eprintln!("⚠️  WARNING: SPOTIFY_PLAYLIST_ID not set\n");
-            String::new()
-        });
-    let music_channel_name = std::env::var("MUSIC_CHANNEL_NAME")
-        .unwrap_or_else(|_| "jamcraft".to_string());
+    let spotify_client_id = std::env::var("SPOTIFY_CLIENT_ID").unwrap_or_else(|_| {
+        eprintln!("\n⚠️  WARNING: SPOTIFY_CLIENT_ID not set");
+        eprintln!("   The bot will start but won't be able to add tracks to Spotify.");
+        eprintln!("   Get credentials from: https://developer.spotify.com/dashboard\n");
+        String::new()
+    });
+    let spotify_client_secret = std::env::var("SPOTIFY_CLIENT_SECRET").unwrap_or_else(|_| {
+        eprintln!("⚠️  WARNING: SPOTIFY_CLIENT_SECRET not set\n");
+        String::new()
+    });
+    let spotify_refresh_token = std::env::var("SPOTIFY_REFRESH_TOKEN").unwrap_or_else(|_| {
+        eprintln!("⚠️  WARNING: SPOTIFY_REFRESH_TOKEN not set");
+        eprintln!("   Run: cargo run --bin spotify_auth\n");
+        String::new()
+    });
+    let spotify_playlist_id = std::env::var("SPOTIFY_PLAYLIST_ID").unwrap_or_else(|_| {
+        eprintln!("⚠️  WARNING: SPOTIFY_PLAYLIST_ID not set\n");
+        String::new()
+    });
+    let music_channel_name =
+        std::env::var("MUSIC_CHANNEL_NAME").unwrap_or_else(|_| "jamcraft".to_string());
     let port = std::env::var("PORT")
         .unwrap_or_else(|_| "3000".to_string())
         .parse::<u16>()
@@ -88,19 +84,24 @@ async fn main() {
         .unwrap_or_else(|_| "false".to_string())
         .parse::<bool>()
         .unwrap_or(false);
-    
+    let scan_existing_on_startup = std::env::var("SCAN_EXISTING_ON_STARTUP")
+        .unwrap_or_else(|_| "false".to_string())
+        .parse::<bool>()
+        .unwrap_or(false);
+
     if dry_run {
         warn!("DRY_RUN mode enabled - tracks will NOT be added to Spotify");
     }
 
     // Initialize clients
     let slack_client = Arc::new(SlackWebClient::new(bot_token));
-    
+
     // Only initialize Spotify client if credentials are provided
-    let spotify_client = if spotify_client_id.is_empty() 
-        || spotify_client_secret.is_empty() 
-        || spotify_refresh_token.is_empty() 
-        || spotify_playlist_id.is_empty() {
+    let spotify_client = if spotify_client_id.is_empty()
+        || spotify_client_secret.is_empty()
+        || spotify_refresh_token.is_empty()
+        || spotify_playlist_id.is_empty()
+    {
         warn!("Spotify credentials incomplete - bot will run but won't add tracks to Spotify");
         None
     } else {
@@ -116,9 +117,10 @@ async fn main() {
     info!("Resolving channel ID for #{}", music_channel_name);
     let music_channel_id = tokio::time::timeout(
         Duration::from_secs(10),
-        slack_client.resolve_channel_id_by_name(&music_channel_name)
-    ).await;
-    
+        slack_client.resolve_channel_id_by_name(&music_channel_name),
+    )
+    .await;
+
     let music_channel_id = match music_channel_id {
         Ok(Ok(Some(id))) => {
             info!("Found channel ID: {}", id);
@@ -164,6 +166,16 @@ async fn main() {
         }
     });
 
+    // Optional: scan existing channel messages and add tracks to playlist
+    if scan_existing_on_startup {
+        let backfill_state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = backfill_existing_messages(backfill_state).await {
+                error!("Backfill failed: {}", e);
+            }
+        });
+    }
+
     // Build router
     let app = Router::new()
         .route("/health", get(health_handler))
@@ -182,13 +194,72 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
+async fn backfill_existing_messages(state: AppState) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Starting backfill: scanning existing messages in #{}", state.config.music_channel_id);
+
+    let texts = state
+        .slack
+        .fetch_channel_messages(&state.config.music_channel_id)
+        .await
+        .map_err(|e| format!("Failed to fetch channel history: {}", e))?;
+
+    let mut seen_track_ids = std::collections::HashSet::new();
+    let mut resolved_count = 0;
+    let mut added_count = 0;
+
+    for text in &texts {
+        let urls = extract_urls(text);
+        for url in urls {
+            if let Some(track_id) = resolve_to_spotify_track_id(&url).await {
+                resolved_count += 1;
+                if seen_track_ids.contains(&track_id) {
+                    continue;
+                }
+                seen_track_ids.insert(track_id.clone());
+
+                let spotify_client = match &state.spotify {
+                    Some(c) => c,
+                    None => continue,
+                };
+
+                if state.dry_run {
+                    info!("[DRY RUN] Would add track from backfill: {}", track_id);
+                    added_count += 1;
+                } else {
+                    match spotify_client.add_track(&track_id).await {
+                        Ok(()) => {
+                            added_count += 1;
+                            state.dedupe.insert(track_id, Instant::now());
+                        }
+                        Err(e) => {
+                            warn!("Failed to add track {} during backfill: {}", track_id, e);
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+
+    info!(
+        "Backfill complete: {} messages scanned, {} tracks resolved, {} added to playlist",
+        texts.len(),
+        resolved_count,
+        added_count
+    );
+    Ok(())
+}
+
 async fn slack_events_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<Value>, StatusCode> {
-    info!("Received request to /slack/events, body length: {} bytes", body.len());
-    
+    info!(
+        "Received request to /slack/events, body length: {} bytes",
+        body.len()
+    );
+
     // Parse JSON first to check if it's a URL verification challenge
     // (we need to respond to challenges even if signature verification fails)
     let envelope: SlackEnvelope = match serde_json::from_slice(&body) {
@@ -207,8 +278,12 @@ async fn slack_events_handler(
             // For url_verification, we should still verify signature if headers are present
             // But we respond to the challenge regardless to allow Slack to verify the endpoint
             if let (Some(timestamp), Some(signature)) = (
-                headers.get("X-Slack-Request-Timestamp").and_then(|h| h.to_str().ok()),
-                headers.get("X-Slack-Signature").and_then(|h| h.to_str().ok()),
+                headers
+                    .get("X-Slack-Request-Timestamp")
+                    .and_then(|h| h.to_str().ok()),
+                headers
+                    .get("X-Slack-Signature")
+                    .and_then(|h| h.to_str().ok()),
             ) {
                 // Try to verify, but don't fail if it doesn't match (for initial setup)
                 if SlackWebClient::verify_signature(
@@ -216,7 +291,9 @@ async fn slack_events_handler(
                     timestamp,
                     signature,
                     &body,
-                ).is_err() {
+                )
+                .is_err()
+                {
                     warn!("Signature verification failed for url_verification, but responding to challenge anyway");
                 } else {
                     info!("Signature verification passed for url_verification");
@@ -243,16 +320,11 @@ async fn slack_events_handler(
         .and_then(|h| h.to_str().ok())
         .ok_or(StatusCode::BAD_REQUEST)?;
 
-    SlackWebClient::verify_signature(
-        &state.config.signing_secret,
-        timestamp,
-        signature,
-        &body,
-    )
-    .map_err(|e| {
-        warn!("Signature verification failed: {:?}", e);
-        e
-    })?;
+    SlackWebClient::verify_signature(&state.config.signing_secret, timestamp, signature, &body)
+        .map_err(|e| {
+            warn!("Signature verification failed: {:?}", e);
+            e
+        })?;
 
     // Handle event callback
     if envelope.event_type == "event_callback" {
@@ -276,12 +348,9 @@ async fn slack_events_handler(
                 if let Some(ts) = event.ts {
                     if let Some(channel) = event.channel {
                         tokio::spawn(async move {
-                            if let Err(e) = process_message(
-                                state.clone(),
-                                &channel,
-                                &ts,
-                                &text,
-                            ).await {
+                            if let Err(e) =
+                                process_message(state.clone(), &channel, &ts, &text).await
+                            {
                                 error!("Error processing message: {}", e);
                             }
                         });
@@ -367,6 +436,7 @@ async fn process_message(
     // Dedupe and add tracks
     let now = Instant::now();
     let mut added_count = 0;
+    let mut failed_count = 0;
 
     for track_id in track_ids {
         // Check dedupe
@@ -389,6 +459,7 @@ async fn process_message(
                 }
                 Err(e) => {
                     warn!("Failed to add track {}: {}", track_id, e);
+                    failed_count += 1;
                 }
             }
         }
@@ -406,6 +477,23 @@ async fn process_message(
         state
             .slack
             .chat_post_message(channel, Some(thread_ts), &message)
+            .await
+            .map_err(|e| format!("Failed to post message: {}", e))?;
+    } else if failed_count > 0 {
+        // Add attempts failed (e.g. 403)
+        state
+            .slack
+            .reactions_add(channel, thread_ts, "grey_question")
+            .await
+            .map_err(|e| format!("Failed to add reaction: {}", e))?;
+
+        state
+            .slack
+            .chat_post_message(
+                channel,
+                Some(thread_ts),
+                "Couldn't add track(s) to the playlist—Spotify returned an error. If this keeps happening, try running the bot locally (Spotify may block cloud servers).",
+            )
             .await
             .map_err(|e| format!("Failed to post message: {}", e))?;
     } else {
